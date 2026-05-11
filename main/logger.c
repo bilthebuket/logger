@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <stdint.h>
+#include <math.h>
+#include <time.h>
 
 #include "driver/uart.h"
 #include "driver/gpio.h"
@@ -10,10 +12,14 @@
 #include "gpgll.h"
 #include "gpgga.h"
 
+#include "lib.h"
+
 #define UART_BUFFER_SIZE 4096
 #define EVENT_QUEUE_SIZE 10 // max number of events in the event queue
 #define TX_PIN GPIO_NUM_1
 #define RX_PIN GPIO_NUM_2
+
+#define METERS_TO_FEET_CONVERSION_FACTOR 3.28084
 
 void app_main(void)
 {
@@ -30,6 +36,15 @@ void app_main(void)
 	ESP_ERROR_CHECK(uart_param_config(UART_NUM_2, &uart_config));
 
 	ESP_ERROR_CHECK(uart_set_pin(UART_NUM_2, TX_PIN, RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+
+	float average_speed = 0;
+	float max_speed = 0;
+	int num_data_points = 0;
+
+	time_t last_time;
+	float last_lat = 0.0;
+	float last_long = 0.0;
+	float last_alt = 0.0;
 
 	char buf[UART_BUFFER_SIZE];
 	while (1)
@@ -52,17 +67,34 @@ void app_main(void)
 							printf("Other type\n");
 							break;
 						}
-						case NMEA_GPGLL:
-						{
-							nmea_gpgll_s *gpgll = (nmea_gpgll_s*) msg;
-							printf("Long: %d\n", gpgll->longitude.degrees);
-							break;
-						}
-						
 						case NMEA_GPGGA:
 						{
 							nmea_gpgga_s* gpgga = (nmea_gpgga_s*) msg;
-							printf("Alt: %f %c\n", gpgga->altitude, gpgga->altitude_unit);
+							float current_lat = sexagesimal_to_radians(gpgga->latitude->degrees, gpgga->latitude->minutes);
+							float current_long = sexagesimal_to_radians(gpgga->longitude->degrees, gpgga->latitude->minutes);
+							time_t current_time = mktime(&gpgga->time);
+							float current_alt = gpgga->altitude * METERS_TO_FEET_CONVERSION_FACTOR;
+
+							if (num_data_points > 0)
+							{
+								float ground_distance = calculate_distance(last_lat, last_long, current_lat, current_long);
+								float distance = pow(pow(ground_distance, 2) + pow(current_alt - last_alt, 2), .5);
+								float seconds_passed = difftime(current_time, last_time);
+								float speed = distance / seconds_passed;
+								
+								if (speed > max_speed)
+								{
+									max_speed = speed;
+								}
+
+								average_speed = average_speed * num_data_points / (num_data_points + 1) + speed / (num_data_points + 1);
+							}
+							
+							last_time = current_time;
+							last_lat = current_lat;
+							last_long = current_long;
+							last_alt = current_alt;
+							num_data_points++;
 							break;
 						}
 					}
