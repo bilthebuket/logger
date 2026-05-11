@@ -16,8 +16,8 @@
 
 #define UART_BUFFER_SIZE 4096
 #define EVENT_QUEUE_SIZE 10 // max number of events in the event queue
-#define TX_PIN GPIO_NUM_1
-#define RX_PIN GPIO_NUM_2
+#define TX_PIN GPIO_NUM_43
+#define RX_PIN GPIO_NUM_44
 
 #define METERS_TO_FEET_CONVERSION_FACTOR 3.28084
 
@@ -36,6 +36,28 @@ void app_main(void)
 	ESP_ERROR_CHECK(uart_param_config(UART_NUM_2, &uart_config));
 
 	ESP_ERROR_CHECK(uart_set_pin(UART_NUM_2, TX_PIN, RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+
+	gpio_config_t io_conf = 
+	{
+		.pin_bit_mask = 
+			(1ULL << GPIO_NUM_1) +
+			(1ULL << GPIO_NUM_2) +
+			(1ULL << GPIO_NUM_3) +
+			(1ULL << GPIO_NUM_4) +
+			(1ULL << GPIO_NUM_5) +
+			(1ULL << GPIO_NUM_6) +
+			(1ULL << GPIO_NUM_7) +
+			(1ULL << GPIO_NUM_8) +
+			(1ULL << GPIO_NUM_9) +
+			(1ULL << GPIO_NUM_10) +
+			(1ULL << GPIO_NUM_11) +
+			(1ULL << GPIO_NUM_12),
+		.mode = GPIO_MODE_OUTPUT,
+		.pull_up_en = GPIO_PULLUP_DISABLE,
+		.pull_down_en = GPIO_PULLDOWN_DISABLE
+	};
+
+	gpio_config(&io_conf);
 
 	float average_speed = 0;
 	float max_speed = 0;
@@ -70,9 +92,9 @@ void app_main(void)
 						case NMEA_GPGGA:
 						{
 							nmea_gpgga_s* gpgga = (nmea_gpgga_s*) msg;
-							float current_lat = sexagesimal_to_radians(gpgga->latitude->degrees, gpgga->latitude->minutes);
-							float current_long = sexagesimal_to_radians(gpgga->longitude->degrees, gpgga->latitude->minutes);
-							time_t current_time = mktime(&gpgga->time);
+							float current_lat = sexagesimal_to_radians(gpgga->latitude.degrees, gpgga->latitude.minutes);
+							float current_long = sexagesimal_to_radians(gpgga->longitude.degrees, gpgga->latitude.minutes);
+							time_t current_time = mktime(&(gpgga->time));
 							float current_alt = gpgga->altitude * METERS_TO_FEET_CONVERSION_FACTOR;
 
 							if (num_data_points > 0)
@@ -85,9 +107,15 @@ void app_main(void)
 								if (speed > max_speed)
 								{
 									max_speed = speed;
+									set_max_speed((int) max_speed);
 								}
 
-								average_speed = average_speed * num_data_points / (num_data_points + 1) + speed / (num_data_points + 1);
+								float new_average_speed = average_speed * num_data_points / (num_data_points + 1) + speed / (num_data_points + 1);
+								if ((int) new_average_speed != (int) average_speed)
+								{
+									set_average_speed((int) new_average_speed);
+								}
+								average_speed = new_average_speed;
 							}
 							
 							last_time = current_time;
