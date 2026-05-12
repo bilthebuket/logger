@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <math.h>
 #include <time.h>
+#include <pthread.h>
 
 #include "driver/uart.h"
 #include "driver/gpio.h"
@@ -37,36 +38,20 @@ void app_main(void)
 
 	ESP_ERROR_CHECK(uart_set_pin(UART_NUM_2, TX_PIN, RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 
-	gpio_config_t io_conf = 
-	{
-		.pin_bit_mask = 
-			(1ULL << GPIO_NUM_1) +
-			(1ULL << GPIO_NUM_2) +
-			(1ULL << GPIO_NUM_3) +
-			(1ULL << GPIO_NUM_4) +
-			(1ULL << GPIO_NUM_5) +
-			(1ULL << GPIO_NUM_6) +
-			(1ULL << GPIO_NUM_7) +
-			(1ULL << GPIO_NUM_8) +
-			(1ULL << GPIO_NUM_9) +
-			(1ULL << GPIO_NUM_10) +
-			(1ULL << GPIO_NUM_11) +
-			(1ULL << GPIO_NUM_12),
-		.mode = GPIO_MODE_OUTPUT,
-		.pull_up_en = GPIO_PULLUP_DISABLE,
-		.pull_down_en = GPIO_PULLDOWN_DISABLE
-	};
-
-	gpio_config(&io_conf);
-
-	float average_speed = 0;
-	float max_speed = 0;
+	float* average_speed = calloc(1, sizeof(float));
+	float* max_speed = calloc(1, sizeof(float));
 	int num_data_points = 0;
 
-	time_t last_time;
+	time_t last_time; 
 	float last_lat = 0.0;
 	float last_long = 0.0;
 	float last_alt = 0.0;
+
+	void* values_to_display[2];
+	values_to_display[MAX_SPEED] = max_speed;
+	values_to_display[AVERAGE_SPEED] = average_speed;
+	pthread_t thread;
+	pthread_create(&thread, NULL, &thread_func, values_to_display);
 
 	char buf[UART_BUFFER_SIZE];
 	while (1)
@@ -104,18 +89,13 @@ void app_main(void)
 								float seconds_passed = difftime(current_time, last_time);
 								float speed = distance / seconds_passed;
 								
-								if (speed > max_speed)
+								if (speed > *max_speed)
 								{
-									max_speed = speed;
-									set_max_speed((int) max_speed);
+									*max_speed = speed;
 								}
 
-								float new_average_speed = average_speed * num_data_points / (num_data_points + 1) + speed / (num_data_points + 1);
-								if ((int) new_average_speed != (int) average_speed)
-								{
-									set_average_speed((int) new_average_speed);
-								}
-								average_speed = new_average_speed;
+								float new_average_speed = *average_speed * (num_data_points - 1) / num_data_points + speed / num_data_points;
+								*average_speed = new_average_speed;
 							}
 							
 							last_time = current_time;
