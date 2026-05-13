@@ -5,16 +5,20 @@
 #include <pthread.h>
 
 #include "lib.h"
+
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "esp_rom_sys.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 
 #include "nmea.h"
 #include "gpgll.h"
 #include "gpgga.h"
 
 #define PI 3.141592653
-#define EARTH_RADIUS_FEET 20903520
+#define EARTH_RADIUS_FEET 20903520.0
 
 #define MAX_SPEED_LOW_DIGIT GPIO_NUM_1
 #define MAX_SPEED_HIGH_DIGIT GPIO_NUM_2
@@ -29,15 +33,22 @@
 #define LOWER_RIGHT_SEGMENT GPIO_NUM_10
 #define BOTTOM_SEGMENT GPIO_NUM_11
 
-#define SLEEP_MICROSECONDS 1
+#define SLEEP_MILLISECONDS 10
 
 #define METERS_TO_FEET_CONVERSION_FACTOR 3.28084
 #define FEET_TO_MILES_CONVERSION_FACTOR 5280.0
 #define SECONDS_TO_HOURS_CONVERSION_FACTOR 3600.0
 
-#define COUNT_SPEED_THRESHHOLD 3.0
+#define COUNT_SPEED_THRESHHOLD 0.0
 
 #define UART_BUFFER_SIZE 4096
+
+#define EVENT_QUEUE_SIZE 10 // max number of events in the event queue
+#define TX_PIN GPIO_NUM_43
+#define RX_PIN GPIO_NUM_44
+
+#define MAX_SPEED 0
+#define AVERAGE_SPEED 1
 
 static void set_low(const int* pins, int length)
 {
@@ -133,7 +144,12 @@ float sexagesimal_to_radians(int degrees, float minutes)
 
 float calculate_distance(float lat1, float long1, float lat2, float long2)
 {
-	float r = 2.0 * (float) EARTH_RADIUS_FEET * asin(pow(pow(sin((lat2-lat1)/2), 2) + cos(lat1) * cos(lat2) * pow(sin((long2 - long1) / 2), 2), .5));
+	float x = sin((lat2-lat1)/2);
+	float y = sin((long2-long1)/2);
+	float z = pow(x, 2) + cos(lat1) * cos(lat2) * pow(y, 2);
+	float w = pow(z, .5);
+	float v = asin(w);
+	float r = 2.0 * EARTH_RADIUS_FEET * v;
 	if (r < 0)
 	{
 		r *= -1;
@@ -164,26 +180,24 @@ void* thread_func(void* v)
 
 	gpio_config(&io_conf);
 
-	float** args = (float**) v;
-	float* average_speed = args[AVERAGE_SPEED];
-	float* max_speed = args[MAX_SPEED];
+	int** args = (int**) v;
+	int* avg = args[AVERAGE_SPEED];
+	int* max = args[MAX_SPEED];
 
 	while (1)
 	{
-		int max = (int) *max_speed;
-		int avg = (int) *average_speed;
+		//printf("avg: %d | max: %d\n", *avg, *max);
+		set_segment_display(MAX_SPEED_LOW_DIGIT, *max % 10);
+		vTaskDelay(pdMS_TO_TICKS(SLEEP_MILLISECONDS));
 
-		set_segment_display(MAX_SPEED_LOW_DIGIT, max % 10);
-		esp_rom_delay_us(SLEEP_MICROSECONDS);
+		set_segment_display(MAX_SPEED_HIGH_DIGIT, *max / 10);
+		vTaskDelay(pdMS_TO_TICKS(SLEEP_MILLISECONDS));
 
-		set_segment_display(MAX_SPEED_HIGH_DIGIT, max / 10);
-		esp_rom_delay_us(SLEEP_MICROSECONDS);
+		set_segment_display(AVERAGE_SPEED_LOW_DIGIT, *avg % 10);
+		vTaskDelay(pdMS_TO_TICKS(SLEEP_MILLISECONDS));
 
-		set_segment_display(AVERAGE_SPEED_LOW_DIGIT, avg % 10);
-		esp_rom_delay_us(SLEEP_MICROSECONDS);
-
-		set_segment_display(AVERAGE_SPEED_HIGH_DIGIT, avg / 10);
-		esp_rom_delay_us(SLEEP_MICROSECONDS);
+		set_segment_display(AVERAGE_SPEED_HIGH_DIGIT, *avg / 10);
+		vTaskDelay(pdMS_TO_TICKS(SLEEP_MILLISECONDS));
 	}
 
 	return NULL;
@@ -196,8 +210,11 @@ void process_data_from_gps_sensor(int (*read_sensor_data)(uart_port_t, void*, ui
 		return;
 	}
 
-	float* average_speed = calloc(1, sizeof(float));
-	float* max_speed = calloc(1, sizeof(float));
+	float average_speed = 0.0;
+	float max_speed = 0.0;
+	int* avg = calloc(1, sizeof(int));
+	int* max = calloc(1, sizeof(int));
+
 	int num_data_points = 0;
 
 	time_t last_time; 
@@ -206,15 +223,15 @@ void process_data_from_gps_sensor(int (*read_sensor_data)(uart_port_t, void*, ui
 	float last_alt = 0.0;
 
 	void* values_to_display[2];
-	values_to_display[MAX_SPEED] = max_speed;
-	values_to_display[AVERAGE_SPEED] = average_speed;
+	values_to_display[MAX_SPEED] = max;
+	values_to_display[AVERAGE_SPEED] = avg;
 	pthread_t thread;
 	pthread_create(&thread, NULL, &thread_func, values_to_display);
 
-	char buf[UART_BUFFER_SIZE];
+	char* buf = malloc(sizeof(char) * UART_BUFFER_SIZE);
 	while (1)
 	{
-		size_t length = (*read_sensor_data)(UART_NUM_2, (uint8_t*) &buf[0], UART_BUFFER_SIZE, pdMS_TO_TICKS(100));
+		size_t length = (*read_sensor_data)(UART_NUM_2, (uint8_t*) buf, UART_BUFFER_SIZE, pdMS_TO_TICKS(100));
 		
 		int start = 0;
 		for (int i = 0; i < length; i++)
@@ -229,7 +246,7 @@ void process_data_from_gps_sensor(int (*read_sensor_data)(uart_port_t, void*, ui
 					{
 						default:
 						{
-							printf("Other type\n");
+							//printf("Other type: %d | NMEA_GPGGA: %d | %s\n", msg->type, NMEA_GPGGA, &buf[start]);
 							break;
 						}
 						case NMEA_GPGGA:
@@ -249,18 +266,24 @@ void process_data_from_gps_sensor(int (*read_sensor_data)(uart_port_t, void*, ui
 								{
 									float speed = (distance / seconds_passed) * (FEET_TO_MILES_CONVERSION_FACTOR / SECONDS_TO_HOURS_CONVERSION_FACTOR);
 									
-									if (speed > *max_speed)
+									if (speed > max_speed)
 									{
-										*max_speed = speed;
+										max_speed = speed;
+										*max = (int) max_speed;
 									}
 
 									if (speed > COUNT_SPEED_THRESHHOLD)
 									{
-										float new_average_speed = *average_speed * (num_data_points - 1) / num_data_points + speed / num_data_points;
-										*average_speed = new_average_speed;
+										float new_average_speed = average_speed * (num_data_points - 1) / num_data_points + speed / num_data_points;
+										average_speed = new_average_speed;
+										*avg = (int) average_speed;
 										num_data_points++;
 									}
 								}
+							}
+							else
+							{
+								num_data_points++;
 							}
 							
 							last_time = current_time;
@@ -277,5 +300,24 @@ void process_data_from_gps_sensor(int (*read_sensor_data)(uart_port_t, void*, ui
 				start = i + 2;
 			}
 		}
+
+		vTaskDelay(pdMS_TO_TICKS(SLEEP_MILLISECONDS));
 	}
+}
+
+void setup_uart(void)
+{
+	QueueHandle_t uart_queue;
+	ESP_ERROR_CHECK(uart_driver_install(UART_NUM_2, UART_BUFFER_SIZE, UART_BUFFER_SIZE, EVENT_QUEUE_SIZE, &uart_queue, 0));
+	
+	uart_config_t uart_config = {
+		.baud_rate = 9600,
+		.data_bits = UART_DATA_8_BITS,
+		.parity = UART_PARITY_DISABLE,
+		.stop_bits = UART_STOP_BITS_1,
+		.flow_ctrl = UART_HW_FLOWCTRL_DISABLE
+	};
+	ESP_ERROR_CHECK(uart_param_config(UART_NUM_2, &uart_config));
+
+	ESP_ERROR_CHECK(uart_set_pin(UART_NUM_2, TX_PIN, RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 }

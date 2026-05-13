@@ -1,0 +1,7 @@
+menu "Application"
+
+config RUN_TESTS
+	bool "Run unit tests"
+	default n
+
+endmenu
