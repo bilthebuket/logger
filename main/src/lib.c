@@ -1,10 +1,17 @@
 #include <stdlib.h>
 #include <math.h>
 #include <unistd.h>
+#include <time.h>
+#include <pthread.h>
 
 #include "lib.h"
 #include "driver/gpio.h"
+#include "driver/uart.h"
 #include "esp_rom_sys.h"
+
+#include "nmea.h"
+#include "gpgll.h"
+#include "gpgga.h"
 
 #define PI 3.141592653
 #define EARTH_RADIUS_FEET 20903520
@@ -23,6 +30,14 @@
 #define BOTTOM_SEGMENT GPIO_NUM_11
 
 #define SLEEP_MICROSECONDS 1
+
+#define METERS_TO_FEET_CONVERSION_FACTOR 3.28084
+#define FEET_TO_MILES_CONVERSION_FACTOR 5280.0
+#define SECONDS_TO_HOURS_CONVERSION_FACTOR 3600.0
+
+#define COUNT_SPEED_THRESHHOLD 3.0
+
+#define UART_BUFFER_SIZE 4096
 
 static void set_low(const int* pins, int length)
 {
@@ -155,18 +170,112 @@ void* thread_func(void* v)
 
 	while (1)
 	{
-		set_segment_display(MAX_SPEED_LOW_DIGIT, ((int) *max_speed) % 10);
+		int max = (int) *max_speed;
+		int avg = (int) *average_speed;
+
+		set_segment_display(MAX_SPEED_LOW_DIGIT, max % 10);
 		esp_rom_delay_us(SLEEP_MICROSECONDS);
 
-		set_segment_display(MAX_SPEED_HIGH_DIGIT, ((int) *max_speed) / 10);
+		set_segment_display(MAX_SPEED_HIGH_DIGIT, max / 10);
 		esp_rom_delay_us(SLEEP_MICROSECONDS);
 
-		set_segment_display(AVERAGE_SPEED_LOW_DIGIT, ((int) *average_speed) % 10);
+		set_segment_display(AVERAGE_SPEED_LOW_DIGIT, avg % 10);
 		esp_rom_delay_us(SLEEP_MICROSECONDS);
 
-		set_segment_display(AVERAGE_SPEED_HIGH_DIGIT, ((int) *average_speed) / 10);
+		set_segment_display(AVERAGE_SPEED_HIGH_DIGIT, avg / 10);
 		esp_rom_delay_us(SLEEP_MICROSECONDS);
 	}
 
 	return NULL;
+}
+
+void process_data_from_gps_sensor(int (*read_sensor_data)(uart_port_t, void*, uint32_t, uint32_t))
+{
+	if (read_sensor_data == NULL)
+	{
+		return;
+	}
+
+	float* average_speed = calloc(1, sizeof(float));
+	float* max_speed = calloc(1, sizeof(float));
+	int num_data_points = 0;
+
+	time_t last_time; 
+	float last_lat = 0.0;
+	float last_long = 0.0;
+	float last_alt = 0.0;
+
+	void* values_to_display[2];
+	values_to_display[MAX_SPEED] = max_speed;
+	values_to_display[AVERAGE_SPEED] = average_speed;
+	pthread_t thread;
+	pthread_create(&thread, NULL, &thread_func, values_to_display);
+
+	char buf[UART_BUFFER_SIZE];
+	while (1)
+	{
+		size_t length = (*read_sensor_data)(UART_NUM_2, (uint8_t*) &buf[0], UART_BUFFER_SIZE, pdMS_TO_TICKS(100));
+		
+		int start = 0;
+		for (int i = 0; i < length; i++)
+		{
+			if (buf[i] == '\r' && buf[i + 1] == '\n')
+			{
+				nmea_s* msg = nmea_parse(&buf[start], i - start + 2, 0);
+
+				if (msg != NULL)
+				{
+					switch (msg->type)
+					{
+						default:
+						{
+							printf("Other type\n");
+							break;
+						}
+						case NMEA_GPGGA:
+						{
+							nmea_gpgga_s* gpgga = (nmea_gpgga_s*) msg;
+							float current_lat = sexagesimal_to_radians(gpgga->latitude.degrees, gpgga->latitude.minutes);
+							float current_long = sexagesimal_to_radians(gpgga->longitude.degrees, gpgga->latitude.minutes);
+							time_t current_time = mktime(&(gpgga->time));
+							float current_alt = gpgga->altitude * METERS_TO_FEET_CONVERSION_FACTOR;
+
+							if (num_data_points > 0)
+							{
+								float ground_distance = calculate_distance(last_lat, last_long, current_lat, current_long);
+								float distance = pow(pow(ground_distance, 2) + pow(current_alt - last_alt, 2), .5);
+								float seconds_passed = difftime(current_time, last_time);
+								if (seconds_passed != 0)
+								{
+									float speed = (distance / seconds_passed) * (FEET_TO_MILES_CONVERSION_FACTOR / SECONDS_TO_HOURS_CONVERSION_FACTOR);
+									
+									if (speed > *max_speed)
+									{
+										*max_speed = speed;
+									}
+
+									if (speed > COUNT_SPEED_THRESHHOLD)
+									{
+										float new_average_speed = *average_speed * (num_data_points - 1) / num_data_points + speed / num_data_points;
+										*average_speed = new_average_speed;
+										num_data_points++;
+									}
+								}
+							}
+							
+							last_time = current_time;
+							last_lat = current_lat;
+							last_long = current_long;
+							last_alt = current_alt;
+							break;
+						}
+					}
+
+					free(msg);
+				}
+
+				start = i + 2;
+			}
+		}
+	}
 }
