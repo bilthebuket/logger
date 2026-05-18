@@ -33,13 +33,15 @@
 #define LOWER_RIGHT_SEGMENT GPIO_NUM_10
 #define BOTTOM_SEGMENT GPIO_NUM_11
 
+#define TEST_PIN GPIO_NUM_12
+
 #define SLEEP_MILLISECONDS 10
 
 #define METERS_TO_FEET_CONVERSION_FACTOR 3.28084
 #define FEET_TO_MILES_CONVERSION_FACTOR 5280.0
 #define SECONDS_TO_HOURS_CONVERSION_FACTOR 3600.0
 
-#define COUNT_SPEED_THRESHHOLD 0.0
+#define COUNT_SPEED_THRESHHOLD 0.0f
 
 #define UART_BUFFER_SIZE 4096
 
@@ -49,6 +51,8 @@
 
 #define MAX_SPEED 0
 #define AVERAGE_SPEED 1
+
+#define ERROR_DIGIT -1
 
 static void set_low(const int* pins, int length)
 {
@@ -75,6 +79,10 @@ static void set_segment_display(int display, int digit)
 	gpio_set_level(display, 1);
 	switch (digit)
 	{
+		case ERROR_DIGIT:
+			set_high((int[]) {MIDDLE_SEGMENT}, 1);
+			set_low((int[]) {TOP_SEGMENT, BOTTOM_SEGMENT, UPPER_LEFT_SEGMENT, UPPER_RIGHT_SEGMENT, LOWER_LEFT_SEGMENT, LOWER_RIGHT_SEGMENT}, 6);
+			break;
 		case 0:
 		{
 			set_high((int[]) {TOP_SEGMENT, BOTTOM_SEGMENT, UPPER_LEFT_SEGMENT, UPPER_RIGHT_SEGMENT, LOWER_LEFT_SEGMENT, LOWER_RIGHT_SEGMENT}, 6);
@@ -172,7 +180,8 @@ void* thread_func(void* v)
 			(1ULL << MIDDLE_SEGMENT) +
 			(1ULL << LOWER_LEFT_SEGMENT) +
 			(1ULL << LOWER_RIGHT_SEGMENT) +
-			(1ULL << BOTTOM_SEGMENT),
+			(1ULL << BOTTOM_SEGMENT) +
+			(1ULL << TEST_PIN),
 		.mode = GPIO_MODE_OUTPUT,
 		.pull_up_en = GPIO_PULLUP_DISABLE,
 		.pull_down_en = GPIO_PULLDOWN_DISABLE
@@ -186,18 +195,35 @@ void* thread_func(void* v)
 
 	while (1)
 	{
-		//printf("avg: %d | max: %d\n", *avg, *max);
-		set_segment_display(MAX_SPEED_LOW_DIGIT, *max % 10);
-		vTaskDelay(pdMS_TO_TICKS(SLEEP_MILLISECONDS));
+		if (*avg > 99 || *avg < 0 || *max > 99 || *max < 0)
+		{
+			set_segment_display(MAX_SPEED_LOW_DIGIT, ERROR_DIGIT);
+			vTaskDelay(pdMS_TO_TICKS(SLEEP_MILLISECONDS));
 
-		set_segment_display(MAX_SPEED_HIGH_DIGIT, *max / 10);
-		vTaskDelay(pdMS_TO_TICKS(SLEEP_MILLISECONDS));
+			set_segment_display(MAX_SPEED_HIGH_DIGIT, ERROR_DIGIT);
+			vTaskDelay(pdMS_TO_TICKS(SLEEP_MILLISECONDS));
 
-		set_segment_display(AVERAGE_SPEED_LOW_DIGIT, *avg % 10);
-		vTaskDelay(pdMS_TO_TICKS(SLEEP_MILLISECONDS));
+			set_segment_display(AVERAGE_SPEED_LOW_DIGIT, ERROR_DIGIT);
+			vTaskDelay(pdMS_TO_TICKS(SLEEP_MILLISECONDS));
 
-		set_segment_display(AVERAGE_SPEED_HIGH_DIGIT, *avg / 10);
-		vTaskDelay(pdMS_TO_TICKS(SLEEP_MILLISECONDS));
+			set_segment_display(AVERAGE_SPEED_HIGH_DIGIT, ERROR_DIGIT);
+			vTaskDelay(pdMS_TO_TICKS(SLEEP_MILLISECONDS));
+		}
+		else
+		{
+			//printf("avg: %d | max: %d\n", *avg, *max);
+			set_segment_display(MAX_SPEED_LOW_DIGIT, *max % 10);
+			vTaskDelay(pdMS_TO_TICKS(SLEEP_MILLISECONDS));
+
+			set_segment_display(MAX_SPEED_HIGH_DIGIT, *max / 10);
+			vTaskDelay(pdMS_TO_TICKS(SLEEP_MILLISECONDS));
+
+			set_segment_display(AVERAGE_SPEED_LOW_DIGIT, *avg % 10);
+			vTaskDelay(pdMS_TO_TICKS(SLEEP_MILLISECONDS));
+
+			set_segment_display(AVERAGE_SPEED_HIGH_DIGIT, *avg / 10);
+			vTaskDelay(pdMS_TO_TICKS(SLEEP_MILLISECONDS));
+		}
 	}
 
 	return NULL;
@@ -246,18 +272,27 @@ void process_data_from_gps_sensor(int (*read_sensor_data)(uart_port_t, void*, ui
 					{
 						default:
 						{
+							//printf("other\n");
+							//gpio_set_level(GPIO_NUM_12, 0);
 							//printf("Other type: %d | NMEA_GPGGA: %d | %s\n", msg->type, NMEA_GPGGA, &buf[start]);
 							break;
 						}
 						case NMEA_GPGGA:
 						{
+							//gpio_set_level(GPIO_NUM_12, 1);
 							nmea_gpgga_s* gpgga = (nmea_gpgga_s*) msg;
 							float current_lat = sexagesimal_to_radians(gpgga->latitude.degrees, gpgga->latitude.minutes);
 							float current_long = sexagesimal_to_radians(gpgga->longitude.degrees, gpgga->latitude.minutes);
 							time_t current_time = mktime(&(gpgga->time));
 							float current_alt = gpgga->altitude * METERS_TO_FEET_CONVERSION_FACTOR;
+							//printf("%f | %f | %lld | %f\n", current_lat, current_long, current_time, current_alt);
 
-							if (num_data_points > 0)
+							if (current_lat == 0.0f && current_long == 0.0f && current_alt == 0.0f)
+							{
+								*avg = -1;
+								*max = -1;
+							}
+							else if (num_data_points > 0)
 							{
 								float ground_distance = calculate_distance(last_lat, last_long, current_lat, current_long);
 								float distance = pow(pow(ground_distance, 2) + pow(current_alt - last_alt, 2), .5);
@@ -280,16 +315,20 @@ void process_data_from_gps_sensor(int (*read_sensor_data)(uart_port_t, void*, ui
 										num_data_points++;
 									}
 								}
+								last_time = current_time;
+								last_lat = current_lat;
+								last_long = current_long;
+								last_alt = current_alt;
 							}
 							else
 							{
 								num_data_points++;
+								last_time = current_time;
+								last_lat = current_lat;
+								last_long = current_long;
+								last_alt = current_alt;
 							}
-							
-							last_time = current_time;
-							last_lat = current_lat;
-							last_long = current_long;
-							last_alt = current_alt;
+
 							break;
 						}
 					}

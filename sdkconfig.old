@@ -978,6 +978,7 @@ CONFIG_PARTITION_TABLE_MD5=y
 # Application
 #
 CONFIG_RUN_TESTS=y
+# CONFIG_FIX_BULLSHIT is not set
 # end of Application
 
 #
